@@ -33,21 +33,8 @@ public class NetworkPlayer : NetworkBehaviour
 
     void Start()
     {
-        if (isLocalPlayer)
-        {
-            // 启用本地控制/相机
-            var cam = GetComponent<PlayerCameraFollow>();
-            if (cam == null) cam = gameObject.AddComponent<PlayerCameraFollow>();
-
-            // 建议在 Player 预制体上手动挂以下组件：
-            // PlayerMovement、PlayerCombat、PlayerHealth、PlayerCameraFollow
-            // 这里不自动添加，避免因 Assembly Definition 或命名空间未正确引用导致编译失败。
-        }
-        else
-        {
-            // 非本地玩家只需要健康组件用于显示；移动/战斗逻辑由服务器驱动
-            // 非本地玩家：由服务器驱动移动与战斗；只需状态组件（如 PlayerHealth）提前挂在预制体上即可。
-        }
+        // 不在这里处理本地玩家相机，改为在 OnStartLocalPlayer() 中处理
+        // 非本地玩家：由服务器驱动移动与战斗；只需状态组件（如 PlayerHealth）提前挂在预制体上即可。
     }
 
     #endregion
@@ -83,7 +70,18 @@ public class NetworkPlayer : NetworkBehaviour
     /// Called when the local player object has been set up.
     /// <para>This happens after OnStartClient(), as it is triggered by an ownership message from the server. This is an appropriate place to activate components or functionality that should only be active for the local player, such as cameras and input.</para>
     /// </summary>
-    public override void OnStartLocalPlayer() { }
+    public override void OnStartLocalPlayer()
+    {
+        // 确保 PlayerCameraFollow 组件存在并初始化
+        var cam = GetComponent<PlayerCameraFollow>();
+        if (cam == null)
+        {
+            cam = gameObject.AddComponent<PlayerCameraFollow>();
+            // 手动调用 OnStartLocalPlayer，因为动态添加的组件不会自动触发
+            cam.OnStartLocalPlayer();
+        }
+        // 如果组件已存在，Mirror 会自动调用它的 OnStartLocalPlayer
+    }
 
     /// <summary>
     /// Called when the local player object is being stopped.
