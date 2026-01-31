@@ -1,11 +1,14 @@
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Mirror;
 using UnityEngine;
 using MultiplayerGame.Auth;
+using MultiplayerGame.Services;
+using MultiplayerGame.Models;
 
-// 自定义简单认证器：演示用途
+// 自定义简单认证器：支持数据库持久化
 // - 支持 login / register 两种操作
-// - 使用内存字典模拟账号库（仅开发期），未来请替换为外部持久化服务
+// - 使用 SQLite 数据库存储账号信息
 // - 通过 NetworkConnectionToClient.authenticationData 传递认证后的用户数据给 NetworkManager
 
 namespace MultiplayerGame.Auth
@@ -22,16 +25,25 @@ namespace MultiplayerGame.Auth
             public string password;
             public string displayName;
         }
-        // 简易内存用户库（仅示例）。Key: username, Value: (passwordHashPlain, displayName)
-        // 注意：仅用于演示。生产环境：使用哈希+盐（BCrypt/Argon2）并放在服务端/数据库。
-        private static readonly Dictionary<string, (string password, string displayName)> users = new();
 
         // 可选：允许重复登录策略
         [Header("Auth Options")]
         public bool allowDuplicateLogin = false;
+        
+        [Tooltip("是否使用数据库存储（关闭则使用内存存储，仅用于测试）")]
+        public bool useDatabaseStorage = true;
+        
+        // 内存用户库（仅在不使用数据库时作为备选）
+        private static readonly Dictionary<string, (string password, string displayName)> memoryUsers = new();
 
         public override void OnStartServer()
         {
+            // 初始化游戏服务（包括数据库）
+            if (useDatabaseStorage)
+            {
+                GameServiceManager.Instance.InitializeServices();
+            }
+            
             // 服务器注册消息处理
             NetworkServer.RegisterHandler<AuthRequestMessage>(OnServerAuthRequest, false);
         }
@@ -39,6 +51,12 @@ namespace MultiplayerGame.Auth
         public override void OnStopServer()
         {
             NetworkServer.UnregisterHandler<AuthRequestMessage>();
+            
+            // 关闭服务
+            if (useDatabaseStorage)
+            {
+                GameServiceManager.Instance.ShutdownServices();
+            }
         }
 
         public override void OnStartClient()
@@ -109,28 +127,115 @@ namespace MultiplayerGame.Auth
         {
             Debug.Log($"[Auth] Req op={msg.operation} user={msg.username} conn={conn.connectionId}");
 
+            if (useDatabaseStorage)
+            {
+                // 使用数据库认证
+                HandleDatabaseAuthAsync(conn, msg);
+            }
+            else
+            {
+                // 使用内存认证（备选/测试用）
+                HandleMemoryAuth(conn, msg);
+            }
+        }
+
+        // 使用数据库进行认证
+        private async void HandleDatabaseAuthAsync(NetworkConnectionToClient conn, AuthRequestMessage msg)
+        {
+            // 等待服务初始化完成
+            int waitCount = 0;
+            while (!GameServiceManager.Instance.IsInitialized && waitCount < 50) // 最多等待5秒
+            {
+                await Task.Delay(100);
+                waitCount++;
+            }
+            
+            if (!GameServiceManager.Instance.IsInitialized)
+            {
+                Debug.LogError("[Auth] 服务初始化超时");
+                ServerRejectWithReason(conn, "服务器初始化中，请稍后重试");
+                return;
+            }
+            
+            var accountService = GameServiceManager.Instance.Account;
+            
+            if (msg.operation == "register")
+            {
+                Debug.Log($"[Auth] 开始注册用户: {msg.username}");
+                var result = await accountService.RegisterAsync(
+                    msg.username, 
+                    msg.password, 
+                    msg.displayName
+                );
+
+                if (result.Success)
+                {
+                    Debug.Log($"[Auth] 注册成功: {result.User.Username}, ID={result.User.Id}");
+                    AcceptAndAttach(conn, result.User.Id, result.User.Username, result.User.DisplayName, result.SessionToken);
+                }
+                else
+                {
+                    Debug.LogWarning($"[Auth] 注册失败: {result.Message}");
+                    ServerRejectWithReason(conn, result.Message);
+                }
+            }
+            else // login
+            {
+                // 重复登录检查
+                if (!allowDuplicateLogin)
+                {
+                    foreach (var c in NetworkServer.connections.Values)
+                    {
+                        if (c != null && c.isAuthenticated && c.authenticationData is PlayerAuthData pad && pad.username == msg.username)
+                        {
+                            ServerRejectWithReason(conn, "该账号已在线");
+                            return;
+                        }
+                    }
+                }
+
+                var result = await accountService.LoginAsync(
+                    msg.username, 
+                    msg.password,
+                    conn.address,
+                    "Unity Client"
+                );
+
+                if (result.Success)
+                {
+                    AcceptAndAttach(conn, result.User.Id, result.User.Username, result.User.DisplayName, result.SessionToken);
+                }
+                else
+                {
+                    ServerRejectWithReason(conn, result.Message);
+                }
+            }
+        }
+
+        // 使用内存进行认证（备选方案）
+        private void HandleMemoryAuth(NetworkConnectionToClient conn, AuthRequestMessage msg)
+        {
             if (msg.operation == "register")
             {
                 if (string.IsNullOrWhiteSpace(msg.username) || string.IsNullOrWhiteSpace(msg.password))
                 {
-                    ServerReject(conn, "用户名或密码为空");
+                    ServerRejectWithReason(conn, "用户名或密码为空");
                     return;
                 }
-                if (users.ContainsKey(msg.username))
+                if (memoryUsers.ContainsKey(msg.username))
                 {
-                    ServerReject(conn, "用户名已存在");
+                    ServerRejectWithReason(conn, "用户名已存在");
                     return;
                 }
                 var dn = string.IsNullOrWhiteSpace(msg.displayName) ? msg.username : msg.displayName.Trim();
-                users[msg.username] = (msg.password, dn);
-                // 注册完成后直接当做已登录
-                AcceptAndAttach(conn, msg.username, dn);
+                memoryUsers[msg.username] = (msg.password, dn);
+                AcceptAndAttach(conn, 0, msg.username, dn, System.Guid.NewGuid().ToString("N"));
             }
             else // login
             {
-                if (!users.TryGetValue(msg.username, out var record) || record.password != msg.password)
+                if (!memoryUsers.TryGetValue(msg.username, out var record) || record.password != msg.password)
                 {
-                    ServerReject(conn, "用户名或密码错误");
+                    ServerRejectWithReason(conn, "用户名或密码错误");
                     return;
                 }
                 // 重复登录检查
@@ -140,25 +245,26 @@ namespace MultiplayerGame.Auth
                     {
                         if (c != null && c.isAuthenticated && c.authenticationData is PlayerAuthData pad && pad.username == msg.username)
                         {
-                            ServerReject(conn, "该账号已在线");
+                            ServerRejectWithReason(conn, "该账号已在线");
                             return;
                         }
                     }
                 }
-                AcceptAndAttach(conn, msg.username, record.displayName);
+                AcceptAndAttach(conn, 0, msg.username, record.displayName, System.Guid.NewGuid().ToString("N"));
             }
         }
 
-        private void AcceptAndAttach(NetworkConnectionToClient conn, string username, string displayName)
+        private void AcceptAndAttach(NetworkConnectionToClient conn, int userId, string username, string displayName, string sessionToken)
         {
             conn.authenticationData = new PlayerAuthData
             {
+                userId = userId,
                 username = username,
                 displayName = displayName,
-                sessionToken = System.Guid.NewGuid().ToString("N")
+                sessionToken = sessionToken
             };
 
-            Debug.Log($"[Auth] Success user={username} display={displayName}");
+            Debug.Log($"[Auth] Success userId={userId} user={username} display={displayName}");
             ServerAccept(conn);
 
             var resp = new AuthResponseMessage
@@ -166,12 +272,12 @@ namespace MultiplayerGame.Auth
                 success = true,
                 reason = "OK",
                 displayName = displayName,
-                sessionToken = (conn.authenticationData as PlayerAuthData)?.sessionToken
+                sessionToken = sessionToken
             };
             conn.Send(resp);
         }
 
-        private void ServerReject(NetworkConnectionToClient conn, string reason)
+        private void ServerRejectWithReason(NetworkConnectionToClient conn, string reason)
         {
             var resp = new AuthResponseMessage
             {
@@ -203,6 +309,7 @@ namespace MultiplayerGame.Auth
     // 认证通过后挂在 connection.authenticationData 的数据模型
     public class PlayerAuthData
     {
+        public int userId;          // 数据库用户ID
         public string username;
         public string displayName;
         public string sessionToken; // 预留重连/刷新
