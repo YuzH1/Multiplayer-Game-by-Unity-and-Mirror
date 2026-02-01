@@ -4,6 +4,7 @@ using Mirror;
 using MultiplayerGame;
 using MultiplayerGame.Auth;
 using MultiplayerGame.Network;
+using MultiplayerGame.UI;
 using TMPro;
 
 // 登录/注册 UI 脚本
@@ -18,7 +19,10 @@ public class LoginUI : MonoBehaviour
     public TMP_InputField usernameInput;
     public TMP_InputField passwordInput;
     public TMP_InputField displayNameInput; // 注册时可选
+    public GameObject displayNameContainer; // 昵称输入框容器（勾选注册时显示）
     public Toggle registerToggle;
+    public Button loginButton;              // 登录/注册按钮
+    public TMP_Text loginButtonText;        // 按钮文字
     
     [Header("Status UI")]
     public TMP_Text statusText;
@@ -33,6 +37,10 @@ public class LoginUI : MonoBehaviour
     public NetworkManager manager;
 
     private bool isConnecting = false;
+    private bool isRegistering = false;        // 标记当前是否为注册操作
+    private bool authResponseReceived = false; // 标记是否收到认证响应
+    private string lastAuthError = "";         // 最后的认证错误信息
+    private bool authErrorHandled = false;     // 标记认证错误是否已处理
 
     void Reset()
     {
@@ -46,6 +54,18 @@ public class LoginUI : MonoBehaviour
         GameDataNetworkHandler.OnCurrencyUpdated += OnCurrencyUpdated;
         NetworkClient.OnDisconnectedEvent += OnClientDisconnected;
         
+        // 订阅认证结果事件（通过 SimpleAuthenticator 的静态事件）
+        SimpleAuthenticator.OnAuthResult += OnAuthResponse;
+        Debug.Log("[LoginUI] 已订阅 SimpleAuthenticator.OnAuthResult 事件");
+        
+        // 监听注册切换
+        if (registerToggle != null)
+        {
+            registerToggle.onValueChanged.AddListener(OnRegisterToggleChanged);
+            // 初始化UI状态
+            OnRegisterToggleChanged(registerToggle.isOn);
+        }
+        
         // 初始状态
         ShowLoginPanel();
     }
@@ -57,31 +77,127 @@ public class LoginUI : MonoBehaviour
         
         // 取消网络事件订阅
         NetworkClient.OnDisconnectedEvent -= OnClientDisconnected;
+        
+        // 取消认证结果事件订阅
+        SimpleAuthenticator.OnAuthResult -= OnAuthResponse;
+        
+        // 取消Toggle监听
+        if (registerToggle != null)
+        {
+            registerToggle.onValueChanged.RemoveListener(OnRegisterToggleChanged);
+        }
+    }
+
+    // 注册Toggle切换事件
+    private void OnRegisterToggleChanged(bool isRegister)
+    {
+        // 显示/隐藏昵称输入框
+        if (displayNameContainer != null)
+        {
+            displayNameContainer.SetActive(isRegister);
+        }
+        else if (displayNameInput != null)
+        {
+            displayNameInput.gameObject.SetActive(isRegister);
+        }
+        
+        // 切换按钮文字
+        if (loginButtonText != null)
+        {
+            loginButtonText.text = isRegister ? "注册" : "登录";
+        }
     }
 
     void Update()
     {
-        // 检查连接状态变化
+        // 检查连接状态变化（主要用于成功情况的检测）
         if (isConnecting)
         {
             if (NetworkClient.isConnected && NetworkClient.connection != null && NetworkClient.connection.isAuthenticated)
             {
                 isConnecting = false;
-                OnLoginSuccess();
+                
+                // 如果是注册操作，显示注册成功弹窗
+                if (isRegistering)
+                {
+                    isRegistering = false;
+                    OnRegisterSuccess();
+                }
+                else
+                {
+                    OnLoginSuccess();
+                }
             }
-            else if (!NetworkClient.active && !NetworkClient.isConnecting)
+            // 失败情况在 OnClientDisconnected 和 OnAuthResponse 中处理
+        }
+    }
+
+    // 处理认证响应
+    private void OnAuthResponse(AuthResponseMessage msg)
+    {
+        authResponseReceived = true;
+        
+        if (!msg.success)
+        {
+            lastAuthError = msg.reason;
+            Debug.LogWarning($"[LoginUI] 认证失败: {msg.reason}");
+            
+            // 无论是 Host 还是 Client 模式，都立即显示错误信息
+            authErrorHandled = true; // 标记已处理，避免 OnClientDisconnected 重复处理
+            SetStatus($"认证失败: {msg.reason}");
+            isConnecting = false;
+            isRegistering = false;
+            
+            // Host模式下认证失败，需要停止服务器
+            if (NetworkServer.active)
             {
-                // 连接失败或被断开
-                isConnecting = false;
-                SetStatus("连接失败，请检查服务器是否运行");
+                Debug.Log("[LoginUI] Host认证失败，停止服务器");
+                manager.StopHost();
             }
+            
+            ShowLoginPanel();
+        }
+        else
+        {
+            lastAuthError = "";
+            Debug.Log($"[LoginUI] 认证成功: {msg.displayName}");
         }
     }
 
     private void OnClientDisconnected()
     {
         isConnecting = false;
-        SetStatus("与服务器断开连接");
+        
+        // 如果认证错误已经被处理过（Host模式），跳过
+        if (authErrorHandled)
+        {
+            authErrorHandled = false;
+            authResponseReceived = false;
+            lastAuthError = "";
+            isRegistering = false;
+            return;
+        }
+        
+        // 如果有认证错误，显示具体原因，否则显示通用断开消息
+        if (authResponseReceived && !string.IsNullOrEmpty(lastAuthError))
+        {
+            SetStatus($"认证失败: {lastAuthError}");
+        }
+        else if (!authResponseReceived)
+        {
+            // 没收到认证响应，说明是网络问题
+            SetStatus("连接失败，请检查服务器是否运行");
+        }
+        else
+        {
+            SetStatus("与服务器断开连接");
+        }
+        
+        // 重置状态
+        authResponseReceived = false;
+        lastAuthError = "";
+        isRegistering = false;
+        
         ShowLoginPanel();
     }
 
@@ -115,7 +231,13 @@ public class LoginUI : MonoBehaviour
             displayName = displayNameInput != null ? displayNameInput.text.Trim() : ""
         };
 
-        SetStatus(registerToggle?.isOn == true ? "正在注册..." : "正在登录...");
+        // 重置认证状态
+        authResponseReceived = false;
+        lastAuthError = "";
+        authErrorHandled = false;
+        isRegistering = registerToggle?.isOn == true;
+
+        SetStatus(isRegistering ? "正在注册..." : "正在登录...");
         isConnecting = true;
         manager.StartClient();
     }
@@ -136,6 +258,12 @@ public class LoginUI : MonoBehaviour
             password = passwordInput != null ? passwordInput.text : "host",
             displayName = displayNameInput != null ? displayNameInput.text.Trim() : "Host"
         };
+
+        // 重置认证状态
+        authResponseReceived = false;
+        lastAuthError = "";
+        authErrorHandled = false;
+        isRegistering = registerToggle?.isOn == true;
 
         SetStatus("正在启动主机...");
         isConnecting = true;
@@ -164,6 +292,31 @@ public class LoginUI : MonoBehaviour
         GameDataNetworkHandler.RequestUserData();
         
         ShowUserInfoPanel();
+    }
+
+    private void OnRegisterSuccess()
+    {
+        // 使用全局弹窗管理器显示注册成功
+        if (PopupManager.Instance != null)
+        {
+            PopupManager.Instance.ShowConfirm("注册成功", "恭喜！您的账号已成功注册。点击确定开始游戏。", () =>
+            {
+                SetStatus("注册成功，正在进入游戏...");
+                
+                // 请求用户数据
+                GameDataNetworkHandler.RequestUserData();
+                
+                ShowUserInfoPanel();
+            });
+        }
+        else
+        {
+            // 如果PopupManager不存在，直接进入游戏
+            Debug.LogWarning("[LoginUI] PopupManager未配置，直接进入游戏");
+            SetStatus("注册成功，正在进入游戏...");
+            GameDataNetworkHandler.RequestUserData();
+            ShowUserInfoPanel();
+        }
     }
 
     private void OnUserDataReceived(UserDataResponseMessage data)

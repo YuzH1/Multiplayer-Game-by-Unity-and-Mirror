@@ -18,6 +18,9 @@ namespace MultiplayerGame.Auth
         // 客户端在连接前由 UI 设置的临时凭证，OnClientAuthenticate 会自动发送
         public static PendingAuth? pending;
 
+        // 静态事件：认证结果通知（供 UI 订阅）
+        public static event System.Action<AuthResponseMessage> OnAuthResult;
+
         public struct PendingAuth
         {
             public string operation;   // login / register
@@ -61,12 +64,14 @@ namespace MultiplayerGame.Auth
 
         public override void OnStartClient()
         {
-            // 客户端可在此预注册回包处理（若需要单独处理）
+            Debug.Log("[Auth] OnStartClient 被调用，注册 AuthResponseMessage 处理器");
+            // requiresAuthentication = false，因为这个消息是在认证完成之前发送的
             NetworkClient.RegisterHandler<AuthResponseMessage>(OnClientAuthResponse, false);
         }
 
         public override void OnStopClient()
         {
+            Debug.Log("[Auth] OnStopClient 被调用，注销 AuthResponseMessage 处理器");
             NetworkClient.UnregisterHandler<AuthResponseMessage>();
         }
 
@@ -142,12 +147,22 @@ namespace MultiplayerGame.Auth
         // 使用数据库进行认证
         private async void HandleDatabaseAuthAsync(NetworkConnectionToClient conn, AuthRequestMessage msg)
         {
+            // 保存连接ID，用于后续检查
+            int connId = conn.connectionId;
+            
             // 等待服务初始化完成
             int waitCount = 0;
             while (!GameServiceManager.Instance.IsInitialized && waitCount < 50) // 最多等待5秒
             {
                 await Task.Delay(100);
                 waitCount++;
+            }
+            
+            // 检查连接是否还有效
+            if (!NetworkServer.connections.ContainsKey(connId))
+            {
+                Debug.LogWarning($"[Auth] 连接 {connId} 在等待服务初始化期间断开");
+                return;
             }
             
             if (!GameServiceManager.Instance.IsInitialized)
@@ -167,6 +182,13 @@ namespace MultiplayerGame.Auth
                     msg.password, 
                     msg.displayName
                 );
+                
+                // 检查连接是否还有效
+                if (!NetworkServer.connections.ContainsKey(connId))
+                {
+                    Debug.LogWarning($"[Auth] 连接 {connId} 在注册过程中断开");
+                    return;
+                }
 
                 if (result.Success)
                 {
@@ -194,12 +216,21 @@ namespace MultiplayerGame.Auth
                     }
                 }
 
+                Debug.Log($"[Auth] 正在验证用户 {msg.username}...");
                 var result = await accountService.LoginAsync(
                     msg.username, 
                     msg.password,
                     conn.address,
                     "Unity Client"
                 );
+                Debug.Log($"[Auth] 验证结果: success={result.Success}, message={result.Message}");
+                
+                // 检查连接是否还有效
+                if (!NetworkServer.connections.ContainsKey(connId))
+                {
+                    Debug.LogWarning($"[Auth] 连接 {connId} 在登录验证过程中断开");
+                    return;
+                }
 
                 if (result.Success)
                 {
@@ -207,6 +238,7 @@ namespace MultiplayerGame.Auth
                 }
                 else
                 {
+                    Debug.Log($"[Auth] 登录失败，准备发送拒绝消息");
                     ServerRejectWithReason(conn, result.Message);
                 }
             }
@@ -279,6 +311,8 @@ namespace MultiplayerGame.Auth
 
         private void ServerRejectWithReason(NetworkConnectionToClient conn, string reason)
         {
+            Debug.Log($"[Auth] ServerRejectWithReason 被调用: conn={conn.connectionId}, reason={reason}");
+            
             var resp = new AuthResponseMessage
             {
                 success = false,
@@ -286,13 +320,51 @@ namespace MultiplayerGame.Auth
                 displayName = string.Empty,
                 sessionToken = string.Empty
             };
+            
+            Debug.Log($"[Auth] 正在发送认证失败消息给连接 {conn.connectionId}...");
             conn.Send(resp);
-            ServerReject(conn);
+            Debug.Log($"[Auth] 认证失败消息已发送给连接 {conn.connectionId}");
+            
+            // 使用协程延迟断开连接，确保消息先发送到客户端
+            DelayedRejectAsync(conn);
+        }
+
+        private async void DelayedRejectAsync(NetworkConnectionToClient conn)
+        {
+            int connId = conn.connectionId;
+            
+            // 等待200毫秒，让消息有时间发送
+            await System.Threading.Tasks.Task.Delay(200);
+            
+            // 回到主线程检查并断开
+            // 检查连接是否还存在且有效
+            if (conn != null && NetworkServer.connections.ContainsKey(connId))
+            {
+                Debug.Log($"[Auth] 延迟断开连接: {connId}");
+                ServerReject(conn);
+            }
+            else
+            {
+                Debug.Log($"[Auth] 连接 {connId} 已经断开，跳过");
+            }
         }
 
         // 客户端收到认证结果（可用于 UI）
         private void OnClientAuthResponse(AuthResponseMessage msg)
         {
+            Debug.Log($"[Auth] OnClientAuthResponse 被调用, success={msg.success}, reason={msg.reason}");
+            
+            // 先触发事件通知 UI
+            if (OnAuthResult != null)
+            {
+                Debug.Log($"[Auth] 触发 OnAuthResult 事件, 订阅者数量: {OnAuthResult.GetInvocationList().Length}");
+                OnAuthResult.Invoke(msg);
+            }
+            else
+            {
+                Debug.LogWarning("[Auth] OnAuthResult 事件没有订阅者!");
+            }
+            
             if (msg.success)
             {
                 Debug.Log($"[Auth] 客户端认证成功, display={msg.displayName}");
