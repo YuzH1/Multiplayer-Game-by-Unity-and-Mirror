@@ -1,0 +1,106 @@
+using System.Collections.Generic;
+using UnityEngine;
+using Mirror;
+// 引入同目录其他脚本的命名空间（若后续拆分命名空间可调整）
+
+/*
+	Documentation: https://mirror-networking.gitbook.io/docs/guides/networkbehaviour
+	API Reference: https://mirror-networking.com/docs/api/Mirror.NetworkBehaviour.html
+*/
+
+public class NetworkPlayer : NetworkBehaviour
+{
+    // 用户标识（服务器同步 -> 客户端只读）
+    [SyncVar] public string Username;
+    [SyncVar] public string DisplayName;
+
+    // 示例：后续可以添加等级、经验、阵营等 SyncVar / SyncDictionary
+
+    #region Unity Callbacks
+
+    /// <summary>
+    /// Add your validation code here after the base.OnValidate(); call.
+    /// </summary>
+    protected override void OnValidate()
+    {
+        base.OnValidate();
+    }
+
+    // NOTE: Do not put objects in DontDestroyOnLoad (DDOL) in Awake.  You can do that in Start instead.
+    void Awake()
+    {
+    }
+
+    void Start()
+    {
+        // 不在这里处理本地玩家相机，改为在 OnStartLocalPlayer() 中处理
+        // 非本地玩家：由服务器驱动移动与战斗；只需状态组件（如 PlayerHealth）提前挂在预制体上即可。
+    }
+
+    #endregion
+
+    #region Start & Stop Callbacks
+
+    /// <summary>
+    /// This is invoked for NetworkBehaviour objects when they become active on the server.
+    /// <para>This could be triggered by NetworkServer.Listen() for objects in the scene, or by NetworkServer.Spawn() for objects that are dynamically created.</para>
+    /// <para>This will be called for objects on a "host" as well as for object on a dedicated server.</para>
+    /// </summary>
+    public override void OnStartServer() { }
+
+    /// <summary>
+    /// Invoked on the server when the object is unspawned
+    /// <para>Useful for saving object data in persistent storage</para>
+    /// </summary>
+    public override void OnStopServer() { }
+
+    /// <summary>
+    /// Called on every NetworkBehaviour when it is activated on a client.
+    /// <para>Objects on the host have this function called, as there is a local client on the host. The values of SyncVars on object are guaranteed to be initialized correctly with the latest state from the server when this function is called on the client.</para>
+    /// </summary>
+    public override void OnStartClient() { }
+
+    /// <summary>
+    /// This is invoked on clients when the server has caused this object to be destroyed.
+    /// <para>This can be used as a hook to invoke effects or do client specific cleanup.</para>
+    /// </summary>
+    public override void OnStopClient() { }
+
+    /// <summary>
+    /// Called when the local player object has been set up.
+    /// <para>This happens after OnStartClient(), as it is triggered by an ownership message from the server. This is an appropriate place to activate components or functionality that should only be active for the local player, such as cameras and input.</para>
+    /// </summary>
+    public override void OnStartLocalPlayer()
+    {
+        // 确保 PlayerCameraFollow 组件存在并初始化
+        var cam = GetComponent<PlayerCameraFollow>();
+        if (cam == null)
+        {
+            cam = gameObject.AddComponent<PlayerCameraFollow>();
+            // 手动调用 OnStartLocalPlayer，因为动态添加的组件不会自动触发
+            cam.OnStartLocalPlayer();
+        }
+        // 如果组件已存在，Mirror 会自动调用它的 OnStartLocalPlayer
+    }
+
+    /// <summary>
+    /// Called when the local player object is being stopped.
+    /// <para>This happens before OnStopClient(), as it may be triggered by an ownership message from the server, or because the player object is being destroyed. This is an appropriate place to deactivate components or functionality that should only be active for the local player, such as cameras and input.</para>
+    /// </summary>
+    public override void OnStopLocalPlayer() {}
+
+    /// <summary>
+    /// This is invoked on behaviours that have authority, based on context and <see cref="NetworkIdentity.hasAuthority">NetworkIdentity.hasAuthority</see>.
+    /// <para>This is called after <see cref="OnStartServer">OnStartServer</see> and before <see cref="OnStartClient">OnStartClient.</see></para>
+    /// <para>When <see cref="NetworkIdentity.AssignClientAuthority">AssignClientAuthority</see> is called on the server, this will be called on the client that owns the object. When an object is spawned with <see cref="NetworkServer.Spawn">NetworkServer.Spawn</see> with a NetworkConnectionToClient parameter included, this will be called on the client that owns the object.</para>
+    /// </summary>
+    public override void OnStartAuthority() { }
+
+    /// <summary>
+    /// This is invoked on behaviours when authority is removed.
+    /// <para>When NetworkIdentity.RemoveClientAuthority is called on the server, this will be called on the client that owns the object.</para>
+    /// </summary>
+    public override void OnStopAuthority() { }
+
+    #endregion
+}
